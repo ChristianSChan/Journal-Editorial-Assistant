@@ -1,0 +1,5 @@
+{
+  "scripts": {
+    "test:scopus-author": "python3 scripts/test_scopus_author.py"
+  }
+}

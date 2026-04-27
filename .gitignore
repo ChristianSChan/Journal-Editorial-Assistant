@@ -1,0 +1,8 @@
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+.env
+.streamlit/secrets.toml
+.journal_review_feedback.json
+decision_records/
