@@ -26,21 +26,30 @@ Current release candidate: `v0.2.0-alpha`
 
 ## Setup
 
+### macOS
+
+Double-click `Start Journal Editorial Assistant.command`.
+
+On first launch, the launcher creates a local `.venv`, installs the required
+packages, starts Streamlit, and opens `http://localhost:8501/` in your browser.
+Keep the Terminal window open while using the app.
+
+If macOS blocks the launcher the first time, right-click it, choose **Open**,
+and approve it.
+
+### Manual Terminal Setup
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Run
+## Manual Run
 
 ```bash
 streamlit run app.py
 ```
-
-On macOS, users can also double-click `Start Journal Editorial Assistant.command`.
-The launcher creates a local `.venv` on first use, installs requirements once,
-opens `http://localhost:8501/`, and reuses the environment on later launches.
 
 ## Project Structure
 
