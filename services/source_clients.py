@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from urllib.parse import quote
 
 import requests
 
 from services.llm_assist import build_reviewer_search_profile
+from services.openalex_config import openalex_headers, openalex_params
 from services.reviewer_retrieval import CandidateEvidence, ReviewerSearchInput, extract_search_terms
 
 REQUEST_TIMEOUT_SECONDS = 7
@@ -22,6 +24,8 @@ SCOPUS_SEARCH_URL = "https://api.elsevier.com/content/search/scopus"
 ORCID_EXPANDED_SEARCH_URL = "https://pub.orcid.org/v3.0/expanded-search/"
 NCBI_ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 NCBI_ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+CLARIVATE_REVIEWER_LOCATOR_DEFAULT_URL = "https://api.clarivate.com/api/wosrl"
+_CLARIVATE_TOKEN_CACHE: dict[str, object] = {"access_token": "", "expires_at": 0.0}
 
 
 def fetch_all_source_evidence(search_input: ReviewerSearchInput) -> list[CandidateEvidence]:
@@ -33,6 +37,7 @@ def fetch_all_source_evidence(search_input: ReviewerSearchInput) -> list[Candida
         fetch_openalex_evidence,
         fetch_semantic_scholar_evidence,
         fetch_scopus_evidence,
+        fetch_clarivate_reviewer_locator_evidence,
         fetch_crossref_evidence,
         fetch_pubmed_evidence,
     ):
@@ -58,11 +63,12 @@ def fetch_openalex_evidence(search_input: ReviewerSearchInput, queries: list[str
     for query in queries:
         response = requests.get(
             OPENALEX_WORKS_URL,
-            params={
+            params=openalex_params({
                 "search": query,
                 "per-page": MAX_RESULTS_PER_QUERY,
                 "sort": "relevance_score:desc",
-            },
+            }),
+            headers=openalex_headers(),
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
@@ -214,6 +220,160 @@ def fetch_scopus_evidence(search_input: ReviewerSearchInput, queries: list[str] 
                     )
                 )
     return _dedupe_evidence(evidence)[:MAX_EVIDENCE_PER_SOURCE]
+
+
+def fetch_clarivate_reviewer_locator_evidence(
+    search_input: ReviewerSearchInput,
+    queries: list[str] | None = None,
+    search_terms: list[str] | None = None,
+) -> list[CandidateEvidence]:
+    headers = _clarivate_headers()
+    if not headers:
+        return []
+
+    base_url = os.getenv(
+        "CLARIVATE_REVIEWER_LOCATOR_BASE_URL",
+        CLARIVATE_REVIEWER_LOCATOR_DEFAULT_URL,
+    ).strip() or CLARIVATE_REVIEWER_LOCATOR_DEFAULT_URL
+    url = base_url.rstrip("/")
+    search_terms = search_terms or extract_search_terms(search_input)
+    payload = {
+        "title": search_input.title,
+        "abstract": search_input.abstract,
+        "keywords": search_input.keywords,
+        "manuscript": {
+            "title": search_input.title,
+            "abstract": search_input.abstract,
+            "keywords": search_input.keywords,
+        },
+        "limit": MAX_RESULTS_PER_QUERY * 3,
+    }
+    headers.update({"Accept": "application/json", "Content-Type": "application/json"})
+
+    response = requests.post(
+        url,
+        json=payload,
+        headers=headers,
+        timeout=REQUEST_TIMEOUT_SECONDS + 5,
+    )
+    response.raise_for_status()
+    data = response.json()
+    reviewers = _clarivate_candidate_items(data)
+    evidence: list[CandidateEvidence] = []
+    for reviewer in reviewers:
+        reviewer_name = _clarivate_person_name(reviewer)
+        if not reviewer_name:
+            continue
+        affiliation = _clarivate_affiliation(reviewer)
+        email = _first_string_by_keys(reviewer, ("email", "emailAddress", "primaryEmail", "contactEmail"))
+        reviewer_id = _first_string_by_keys(
+            reviewer,
+            (
+                "id",
+                "reviewerId",
+                "researcherId",
+                "wosResearcherId",
+                "rid",
+                "personId",
+                "authorId",
+            ),
+        )
+        publications = _clarivate_publications(reviewer)
+        for publication in publications:
+            title = _first_string_by_keys(
+                publication,
+                ("title", "paperTitle", "articleTitle", "publicationTitle", "name"),
+            )
+            if not title:
+                continue
+            doi = _normalize_doi(_first_string_by_keys(publication, ("doi", "DOI")))
+            url_value = (
+                _first_string_by_keys(publication, ("url", "link", "recordUrl", "sourceUrl"))
+                or _doi_url(doi)
+                or f"{url}#{quote(reviewer_name)}"
+            )
+            evidence.append(
+                CandidateEvidence(
+                    reviewer_name=reviewer_name,
+                    affiliation=affiliation,
+                    email=email,
+                    source="Clarivate Reviewer Locator",
+                    paper_title=title,
+                    abstract=_first_string_by_keys(publication, ("abstract", "summary")),
+                    journal_name=_first_string_by_keys(
+                        publication,
+                        ("journal", "journalName", "sourceTitle", "publicationName", "venue"),
+                    ),
+                    publication_type=_normalize_publication_type(
+                        _first_string_by_keys(publication, ("type", "documentType", "publicationType"))
+                    ),
+                    publication_language=_first_string_by_keys(publication, ("language", "lang")) or _english_language_fallback(title),
+                    publication_year=_clarivate_year(publication),
+                    doi=doi,
+                    url=url_value,
+                    citation_count=_int_or_none(
+                        _first_string_by_keys(
+                            publication,
+                            ("timesCited", "timesCitedCount", "citationCount", "citations"),
+                        )
+                    ),
+                    matched_keywords=_matched_terms(title, search_terms),
+                    clarivate_reviewer_id=reviewer_id,
+                )
+            )
+    return _dedupe_evidence(evidence)[:MAX_EVIDENCE_PER_SOURCE]
+
+
+def _clarivate_headers() -> dict[str, str]:
+    api_key = os.getenv("CLARIVATE_REVIEWER_LOCATOR_API_KEY", "").strip()
+    if api_key:
+        return {"X-ApiKey": api_key, "X-APIKey": api_key}
+
+    access_token = os.getenv("CLARIVATE_REVIEWER_LOCATOR_ACCESS_TOKEN", "").strip()
+    if access_token:
+        return {"Authorization": f"Bearer {access_token}"}
+
+    token = _clarivate_client_credentials_token()
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
+
+
+def _clarivate_client_credentials_token() -> str:
+    cached_token = str(_CLARIVATE_TOKEN_CACHE.get("access_token") or "")
+    expires_at = float(_CLARIVATE_TOKEN_CACHE.get("expires_at") or 0)
+    if cached_token and expires_at > time.time() + 60:
+        return cached_token
+
+    token_url = os.getenv("CLARIVATE_REVIEWER_LOCATOR_TOKEN_URL", "").strip()
+    client_id = os.getenv("CLARIVATE_REVIEWER_LOCATOR_CLIENT_ID", "").strip()
+    client_secret = os.getenv("CLARIVATE_REVIEWER_LOCATOR_CLIENT_SECRET", "").strip()
+    scope = os.getenv("CLARIVATE_REVIEWER_LOCATOR_SCOPE", "").strip()
+    if not (token_url and client_id and client_secret):
+        return ""
+
+    data = {
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }
+    if scope:
+        data["scope"] = scope
+    response = requests.post(
+        token_url,
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    token_payload = response.json()
+    access_token = str(token_payload.get("access_token") or "").strip()
+    if not access_token:
+        return ""
+    expires_in = _int_or_none(token_payload.get("expires_in")) or 3600
+    _CLARIVATE_TOKEN_CACHE["access_token"] = access_token
+    _CLARIVATE_TOKEN_CACHE["expires_at"] = time.time() + expires_in
+    return access_token
 
 
 def fetch_crossref_evidence(search_input: ReviewerSearchInput, queries: list[str] | None = None, search_terms: list[str] | None = None) -> list[CandidateEvidence]:
@@ -383,6 +543,123 @@ def _scopus_url(eid: str | None) -> str:
     if not eid:
         return ""
     return f"https://www.scopus.com/record/display.uri?eid={quote(eid, safe='')}"
+
+
+def _clarivate_candidate_items(data: object) -> list[dict]:
+    containers = _candidate_containers(data)
+    reviewers: list[dict] = []
+    for container in containers:
+        if isinstance(container, list):
+            reviewers.extend(item for item in container if isinstance(item, dict))
+    if isinstance(data, list):
+        reviewers.extend(item for item in data if isinstance(item, dict))
+    if isinstance(data, dict) and not reviewers:
+        for value in data.values():
+            if isinstance(value, list) and any(isinstance(item, dict) for item in value):
+                reviewers.extend(item for item in value if isinstance(item, dict))
+    return reviewers
+
+
+def _candidate_containers(data: object) -> list[object]:
+    if not isinstance(data, dict):
+        return []
+    keys = (
+        "reviewers",
+        "candidates",
+        "recommendations",
+        "suggestions",
+        "items",
+        "results",
+        "data",
+        "authors",
+    )
+    containers = [data.get(key) for key in keys if key in data]
+    nested = data.get("response") or data.get("result") or data.get("payload")
+    if isinstance(nested, dict):
+        containers.extend(_candidate_containers(nested))
+    return containers
+
+
+def _clarivate_person_name(reviewer: dict) -> str:
+    direct = _first_string_by_keys(
+        reviewer,
+        ("name", "fullName", "displayName", "preferredName", "reviewerName", "researcherName"),
+    )
+    if direct:
+        return direct
+    first = _first_string_by_keys(reviewer, ("firstName", "givenName", "givenNames"))
+    last = _first_string_by_keys(reviewer, ("lastName", "familyName", "surname"))
+    return " ".join(part for part in (first, last) if part).strip()
+
+
+def _clarivate_affiliation(reviewer: dict) -> str | None:
+    direct = _first_string_by_keys(
+        reviewer,
+        ("affiliation", "currentAffiliation", "institution", "organization", "organisation"),
+    )
+    if direct:
+        return direct
+    affiliations = reviewer.get("affiliations") or reviewer.get("organizations")
+    if isinstance(affiliations, list):
+        values = []
+        for affiliation in affiliations:
+            if isinstance(affiliation, str):
+                values.append(affiliation)
+            elif isinstance(affiliation, dict):
+                value = _first_string_by_keys(affiliation, ("name", "organization", "institution", "displayName"))
+                if value:
+                    values.append(value)
+        return ", ".join(values[:2]) or None
+    return None
+
+
+def _clarivate_publications(reviewer: dict) -> list[dict]:
+    keys = (
+        "publications",
+        "matchedPublications",
+        "matchingPublications",
+        "matchedPapers",
+        "papers",
+        "works",
+        "articles",
+        "relevantPublications",
+        "recentPublications",
+    )
+    publications: list[dict] = []
+    for key in keys:
+        value = reviewer.get(key)
+        if isinstance(value, list):
+            publications.extend(item for item in value if isinstance(item, dict))
+    return publications
+
+
+def _clarivate_year(publication: dict) -> int | None:
+    for key in ("year", "publicationYear", "publishedYear", "pubYear"):
+        value = publication.get(key)
+        year = _int_or_none(value)
+        if year:
+            return year
+    for key in ("publicationDate", "publishedDate", "date", "coverDate"):
+        value = publication.get(key)
+        if isinstance(value, str):
+            match = re.search(r"\b(19|20)\d{2}\b", value)
+            if match:
+                return int(match.group(0))
+    return None
+
+
+def _first_string_by_keys(item: dict, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, dict):
+            nested = _first_string_by_keys(value, ("value", "name", "displayName", "url"))
+            if nested:
+                return nested
+    return None
 
 
 def _dedupe_evidence(evidence: list[CandidateEvidence]) -> list[CandidateEvidence]:

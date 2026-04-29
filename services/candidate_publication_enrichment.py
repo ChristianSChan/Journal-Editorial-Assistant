@@ -9,6 +9,7 @@ from urllib.parse import quote
 import requests
 
 from services.llm_assist import build_reviewer_search_profile
+from services.openalex_config import openalex_headers, openalex_params
 from services.reviewer_retrieval import CandidateEvidence, ReviewerCandidate, ReviewerSearchInput, extract_search_terms
 
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
@@ -59,12 +60,13 @@ def _openalex_author_works(
         try:
             response = requests.get(
                 OPENALEX_WORKS_URL,
-                params={
+                params=openalex_params({
                     "filter": f"authorships.author.id:{author_filter_id}",
                     "search": query,
                     "per-page": MAX_WORKS_PER_CANDIDATE,
                     "sort": "publication_year:desc",
-                },
+                }),
+                headers=openalex_headers(),
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()

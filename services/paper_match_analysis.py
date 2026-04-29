@@ -15,6 +15,7 @@ class LlmPaperMatch(BaseModel):
     paper_title: str
     topic_match: bool = False
     method_match: bool = False
+    population_match: bool = False
     matched_terms: list[str] = Field(default_factory=list)
     rationale: str = ""
 
@@ -39,9 +40,10 @@ def analyze_paper_matches_with_llm(
         "Assess whether retrieved papers match a manuscript for reviewer discovery. "
         "Use only the manuscript title, abstract, keywords, and each paper abstract. "
         "Return JSON only with key paper_matches. Each item must include: "
-        "paper_title, topic_match, method_match, matched_terms, rationale. "
+        "paper_title, topic_match, method_match, population_match, matched_terms, rationale. "
         "topic_match should be true only when the paper abstract shares a substantive topic. "
         "method_match should be true only when the paper abstract shares a method, design, or analytic approach. "
+        "population_match should be true only when the paper abstract shares a population, sample, country, region, or applied context. "
         "Do not infer beyond the supplied text."
     )
     payload = {
@@ -71,6 +73,7 @@ def analyze_paper_matches_with_llm(
                 paper_title=str(item.get("paper_title", "")),
                 topic_match=bool(item.get("topic_match", False)),
                 method_match=bool(item.get("method_match", False)),
+                population_match=bool(item.get("population_match", False)),
                 matched_terms=[
                     str(term).strip()
                     for term in item.get("matched_terms", [])

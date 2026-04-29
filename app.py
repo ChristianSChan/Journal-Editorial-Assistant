@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import hashlib
+from pathlib import Path
 from datetime import date, datetime
 
 import streamlit as st
@@ -26,6 +28,7 @@ from services.decision_records import (
     save_decision_record,
 )
 from services.identity_verification import attach_identity_verification
+from services.institution_suggestions import suggest_openalex_institutions
 from services.invitation_opener_drafting import (
     draft_invitation_opener,
     draft_invitation_opener_with_llm,
@@ -47,13 +50,23 @@ from services.reviewer_retrieval import (
     retrieve_reviewers,
 )
 from services.search_feedback import (
+    FEEDBACK_REASONS,
     feedback_adjustment,
     feedback_summary,
     record_candidate_feedback,
 )
 
 PAGE_SIZE = 10
-SOURCE_OPTIONS = ["OpenAlex", "Semantic Scholar", "Scopus", "Crossref", "ORCID", "PubMed"]
+API_SETTINGS_PATH = Path.home() / "Library" / "Application Support" / "Journal Editorial Assistant" / "api_settings.json"
+SOURCE_OPTIONS = [
+    "OpenAlex",
+    "Semantic Scholar",
+    "Scopus",
+    "Clarivate Reviewer Locator",
+    "Crossref",
+    "ORCID",
+    "PubMed",
+]
 FILTER_TERM_SYNONYM_GROUPS = {
     "ageing / aging / older adults": {
         "ageing",
@@ -143,8 +156,25 @@ st.set_page_config(
 
 
 def render_api_settings() -> None:
+    _load_saved_api_settings_once()
     with st.expander("API and LLM settings", expanded=False):
         st.caption("Keys entered here are used for this running app session and are not written to project files.")
+        st.caption(f"Optional saved settings file: {API_SETTINGS_PATH}")
+        st.markdown("**Scholarly metadata sources**")
+        openalex_email_col, openalex_key_col = st.columns(2)
+        with openalex_email_col:
+            openalex_contact_email = st.text_input(
+                "OpenAlex contact email",
+                value=st.session_state.get("openalex_contact_email", ""),
+                help="Optional. Sent as mailto for polite OpenAlex API requests and improved reliability.",
+            )
+        with openalex_key_col:
+            openalex_api_key = st.text_input(
+                "OpenAlex API key",
+                value=st.session_state.get("openalex_api_key", ""),
+                type="password",
+                help="Optional. Only needed for OpenAlex Premium or institution-provided access.",
+            )
         scopus_col, semantic_col = st.columns(2)
         with scopus_col:
             scopus_key = st.text_input(
@@ -160,35 +190,126 @@ def render_api_settings() -> None:
                 type="password",
                 help="Optional. Improves Semantic Scholar reliability and rate limits for author/citation enrichment.",
             )
+        wiley_token = st.text_input(
+            "Wiley TDM client token",
+            value=st.session_state.get("wiley_tdm_client_token", ""),
+            type="password",
+            help=(
+                "Optional. Enables future Wiley full-text enrichment for Wiley "
+                "articles by DOI. This is not used for email or author-profile lookup."
+            ),
+        )
+
+        st.markdown("**Clarivate Reviewer Locator**")
+        clarivate_mode_col, clarivate_base_col = st.columns(2)
+        with clarivate_mode_col:
+            clarivate_auth_mode = st.selectbox(
+                "Clarivate authentication",
+                ["API key", "Bearer token", "Client credentials"],
+                index={"api_key": 0, "bearer": 1, "client_credentials": 2}.get(
+                    st.session_state.get("clarivate_auth_mode", "api_key"),
+                    0,
+                ),
+                help="Choose the credential type shown in your Clarivate Developer Portal application subscription.",
+            )
+        clarivate_auth_key = {
+            "API key": "api_key",
+            "Bearer token": "bearer",
+            "Client credentials": "client_credentials",
+        }[clarivate_auth_mode]
+        with clarivate_base_col:
+            clarivate_base_url = st.text_input(
+                "Clarivate Reviewer Locator base URL",
+                value=st.session_state.get("clarivate_reviewer_locator_base_url", "https://api.clarivate.com/api/wosrl"),
+                help="Default base URL for Web of Science Reviewer Locator API.",
+            )
+        if clarivate_auth_key == "api_key":
+            clarivate_key = st.text_input(
+                "Clarivate API key",
+                value=st.session_state.get("clarivate_reviewer_locator_api_key", ""),
+                type="password",
+                help="Use this when Clarivate shows an API key for your subscribed application.",
+            )
+            clarivate_bearer_token = ""
+            clarivate_client_id = ""
+            clarivate_client_secret = ""
+            clarivate_token_url = ""
+            clarivate_scope = ""
+        elif clarivate_auth_key == "bearer":
+            clarivate_key = ""
+            clarivate_bearer_token = st.text_input(
+                "Clarivate bearer access token",
+                value=st.session_state.get("clarivate_bearer_token", ""),
+                type="password",
+                help="Use this if Clarivate or your institution provides a ready-to-use access token.",
+            )
+            clarivate_client_id = ""
+            clarivate_client_secret = ""
+            clarivate_token_url = ""
+            clarivate_scope = ""
+        else:
+            token_col, scope_col = st.columns([2, 1])
+            with token_col:
+                clarivate_token_url = st.text_input(
+                    "Clarivate token URL",
+                    value=st.session_state.get("clarivate_token_url", ""),
+                    placeholder="https://api.clarivate.com/auth/(auth method id)/api/(api id)/token",
+                    help="Copy this from the Reviewer Locator API page in the Clarivate Developer Portal.",
+                )
+            with scope_col:
+                clarivate_scope = st.text_input(
+                    "Clarivate scope",
+                    value=st.session_state.get("clarivate_scope", ""),
+                    help="Optional; leave blank unless Clarivate lists a required scope.",
+                )
+            client_col, secret_col = st.columns(2)
+            with client_col:
+                clarivate_client_id = st.text_input(
+                    "Clarivate client ID",
+                    value=st.session_state.get("clarivate_client_id", ""),
+                    type="password",
+                )
+            with secret_col:
+                clarivate_client_secret = st.text_input(
+                    "Clarivate client secret",
+                    value=st.session_state.get("clarivate_client_secret", ""),
+                    type="password",
+                )
+            clarivate_key = ""
+            clarivate_bearer_token = ""
+
+        st.markdown("**LLM assistance**")
         _, provider_col = st.columns(2)
         with provider_col:
-            saved_provider = st.session_state.get("llm_provider", "openai")
-            provider_options = ["OpenAI-compatible API", "Custom CLI", "Codex CLI", "Ollama / Local CLI"]
-            provider_indices = {"openai": 0, "custom_cli": 1, "codex_cli": 2, "local_cli": 3}
+            saved_provider = st.session_state.get("llm_provider", "codex_cli")
+            provider_options = ["Codex CLI", "Local CLI", "OpenAI-compatible API"]
+            provider_indices = {"codex_cli": 0, "local_cli": 1, "openai": 2}
             llm_provider_choice = st.selectbox(
                 "LLM provider",
                 provider_options,
                 index=provider_indices.get(saved_provider, 0),
-                help="Use an OpenAI-compatible endpoint, a custom local command, Codex CLI, or Ollama-style local CLI.",
+                help="Codex CLI uses your installed Codex login. OpenAI-compatible API can point to OpenAI or another compatible provider.",
             )
 
         provider_key = {
-            "OpenAI-compatible API": "openai",
-            "Custom CLI": "custom_cli",
             "Codex CLI": "codex_cli",
-            "Ollama / Local CLI": "local_cli",
+            "Local CLI": "local_cli",
+            "OpenAI-compatible API": "openai",
         }[llm_provider_choice]
         local_col, model_col = st.columns(2)
         with local_col:
-            default_command = _default_llm_command(provider_key)
+            default_command = (
+                "codex"
+                if provider_key == "codex_cli"
+                else "ollama"
+            )
             local_llm_command = st.text_input(
-                "LLM command or command template",
+                "LLM command",
                 value=st.session_state.get("local_llm_command", default_command),
                 disabled=provider_key == "openai",
                 help=(
-                    "For Custom CLI, enter a command template such as "
-                    "`llm --model {model}`. The prompt is passed through stdin. "
-                    "For Ollama-style local models, enter `ollama`."
+                    "For Codex CLI, use the codex executable path. "
+                    "For Ollama-style local models, use the local command."
                 ),
             )
         with model_col:
@@ -196,25 +317,29 @@ def render_api_settings() -> None:
                 "LLM model",
                 value=st.session_state.get(
                     "llm_model",
-                    _default_llm_model(provider_key),
+                    "" if provider_key == "codex_cli" else ("llama3.1:8b" if provider_key == "local_cli" else "gpt-4o-mini"),
                 ),
                 help="For Codex CLI, leave blank to use the Codex default model.",
             )
 
-        openai_col, toggle_col = st.columns([2, 1])
+        openai_col, endpoint_col, toggle_col = st.columns([2, 2, 1])
         with openai_col:
             openai_key = st.text_input(
-                "API key",
+                "OpenAI-compatible API key",
                 value=st.session_state.get("openai_api_key", ""),
                 type="password",
                 disabled=provider_key != "openai",
-                help="Used only when the provider is OpenAI-compatible API.",
+                help="Used only when LLM provider is OpenAI-compatible API.",
             )
-            openai_base_url = st.text_input(
-                "OpenAI-compatible chat completions URL",
-                value=st.session_state.get("openai_base_url", "https://api.openai.com/v1/chat/completions"),
+        with endpoint_col:
+            openai_endpoint = st.text_input(
+                "Chat completions endpoint",
+                value=st.session_state.get(
+                    "openai_chat_completions_url",
+                    "https://api.openai.com/v1/chat/completions",
+                ),
                 disabled=provider_key != "openai",
-                help="For compatible providers, enter the full /chat/completions endpoint.",
+                help="Use the provider's OpenAI-compatible /chat/completions endpoint.",
             )
         with toggle_col:
             use_llm = st.checkbox(
@@ -222,25 +347,73 @@ def render_api_settings() -> None:
                 value=st.session_state.get("use_llm_assistance", False),
             )
 
+        st.session_state["openalex_contact_email"] = openalex_contact_email.strip()
+        st.session_state["openalex_api_key"] = openalex_api_key.strip()
         st.session_state["scopus_api_key"] = scopus_key.strip()
         st.session_state["semantic_scholar_api_key"] = semantic_scholar_key.strip()
+        st.session_state["wiley_tdm_client_token"] = wiley_token.strip()
+        st.session_state["clarivate_auth_mode"] = clarivate_auth_key
+        st.session_state["clarivate_reviewer_locator_api_key"] = clarivate_key.strip()
+        st.session_state["clarivate_bearer_token"] = clarivate_bearer_token.strip()
+        st.session_state["clarivate_client_id"] = clarivate_client_id.strip()
+        st.session_state["clarivate_client_secret"] = clarivate_client_secret.strip()
+        st.session_state["clarivate_token_url"] = clarivate_token_url.strip()
+        st.session_state["clarivate_scope"] = clarivate_scope.strip()
+        st.session_state["clarivate_reviewer_locator_base_url"] = clarivate_base_url.strip()
         st.session_state["llm_provider"] = provider_key
         st.session_state["local_llm_command"] = local_llm_command.strip() or default_command
         st.session_state["llm_model"] = llm_model.strip()
         st.session_state["openai_api_key"] = openai_key.strip()
-        st.session_state["openai_base_url"] = openai_base_url.strip()
+        st.session_state["openai_chat_completions_url"] = openai_endpoint.strip()
         st.session_state["use_llm_assistance"] = use_llm
         _apply_api_settings()
 
         status_parts = [
             "Scopus: enabled" if os.getenv("SCOPUS_API_KEY") else "Scopus: not configured",
             "Semantic Scholar: enabled" if os.getenv("SEMANTIC_SCHOLAR_API_KEY") else "Semantic Scholar: not configured",
+            "Wiley TDM: enabled" if os.getenv("WILEY_TDM_CLIENT_TOKEN") else "Wiley TDM: not configured",
+            "OpenAlex polite mode: enabled" if os.getenv("OPENALEX_CONTACT_EMAIL") else "OpenAlex polite mode: not configured",
+            "Clarivate Reviewer Locator: enabled" if _clarivate_configured() else "Clarivate Reviewer Locator: not configured",
             llm_status_label() if use_llm else "LLM: not enabled",
         ]
         st.caption(" | ".join(status_parts))
 
+        settings_cols = st.columns(3)
+        with settings_cols[0]:
+            if st.button("Save API settings locally"):
+                _save_api_settings()
+                st.success(f"Saved API settings outside the app folder: {API_SETTINGS_PATH}")
+        with settings_cols[1]:
+            if st.button("Load saved API settings"):
+                if _load_saved_api_settings(force=True):
+                    _apply_api_settings()
+                    st.success("Loaded saved API settings.")
+                    st.rerun()
+                else:
+                    st.warning("No saved API settings file found.")
+        with settings_cols[2]:
+            if st.button("Forget saved API settings"):
+                if _delete_saved_api_settings():
+                    st.success("Deleted saved API settings file.")
+                else:
+                    st.caption("No saved API settings file to delete.")
+
         if st.button("Clear API keys for this session"):
-            for key in ("scopus_api_key", "semantic_scholar_api_key", "openai_api_key"):
+            for key in (
+                "scopus_api_key",
+                "semantic_scholar_api_key",
+                "wiley_tdm_client_token",
+                "openalex_contact_email",
+                "openalex_api_key",
+                "clarivate_reviewer_locator_api_key",
+                "clarivate_bearer_token",
+                "clarivate_client_id",
+                "clarivate_client_secret",
+                "clarivate_token_url",
+                "clarivate_scope",
+                "openai_api_key",
+                "openai_chat_completions_url",
+            ):
                 st.session_state[key] = ""
             st.session_state["use_llm_assistance"] = False
             _apply_api_settings()
@@ -248,13 +421,24 @@ def render_api_settings() -> None:
 
 
 def _apply_api_settings() -> None:
+    openalex_contact_email = st.session_state.get("openalex_contact_email", "").strip()
+    openalex_api_key = st.session_state.get("openalex_api_key", "").strip()
     scopus_key = st.session_state.get("scopus_api_key", "").strip()
     semantic_scholar_key = st.session_state.get("semantic_scholar_api_key", "").strip()
+    wiley_tdm_client_token = st.session_state.get("wiley_tdm_client_token", "").strip()
+    clarivate_key = st.session_state.get("clarivate_reviewer_locator_api_key", "").strip()
+    clarivate_auth_mode = st.session_state.get("clarivate_auth_mode", "api_key").strip()
+    clarivate_bearer_token = st.session_state.get("clarivate_bearer_token", "").strip()
+    clarivate_client_id = st.session_state.get("clarivate_client_id", "").strip()
+    clarivate_client_secret = st.session_state.get("clarivate_client_secret", "").strip()
+    clarivate_token_url = st.session_state.get("clarivate_token_url", "").strip()
+    clarivate_scope = st.session_state.get("clarivate_scope", "").strip()
+    clarivate_base_url = st.session_state.get("clarivate_reviewer_locator_base_url", "").strip()
     openai_key = st.session_state.get("openai_api_key", "").strip()
+    openai_chat_completions_url = st.session_state.get("openai_chat_completions_url", "").strip()
     llm_provider_value = st.session_state.get("llm_provider", "codex_cli").strip()
     llm_model = st.session_state.get("llm_model", "").strip()
     local_llm_command = st.session_state.get("local_llm_command", "").strip()
-    openai_base_url = st.session_state.get("openai_base_url", "").strip()
     use_llm = st.session_state.get("use_llm_assistance", False)
 
     if scopus_key:
@@ -262,18 +446,55 @@ def _apply_api_settings() -> None:
     else:
         os.environ.pop("SCOPUS_API_KEY", None)
 
+    if openalex_contact_email:
+        os.environ["OPENALEX_CONTACT_EMAIL"] = openalex_contact_email
+    else:
+        os.environ.pop("OPENALEX_CONTACT_EMAIL", None)
+
+    if openalex_api_key:
+        os.environ["OPENALEX_API_KEY"] = openalex_api_key
+    else:
+        os.environ.pop("OPENALEX_API_KEY", None)
+
     if semantic_scholar_key:
         os.environ["SEMANTIC_SCHOLAR_API_KEY"] = semantic_scholar_key
     else:
         os.environ.pop("SEMANTIC_SCHOLAR_API_KEY", None)
 
+    if wiley_tdm_client_token:
+        os.environ["WILEY_TDM_CLIENT_TOKEN"] = wiley_tdm_client_token
+    else:
+        os.environ.pop("WILEY_TDM_CLIENT_TOKEN", None)
+
+    os.environ.pop("CLARIVATE_REVIEWER_LOCATOR_API_KEY", None)
+    os.environ.pop("CLARIVATE_REVIEWER_LOCATOR_ACCESS_TOKEN", None)
+    os.environ.pop("CLARIVATE_REVIEWER_LOCATOR_CLIENT_ID", None)
+    os.environ.pop("CLARIVATE_REVIEWER_LOCATOR_CLIENT_SECRET", None)
+    os.environ.pop("CLARIVATE_REVIEWER_LOCATOR_TOKEN_URL", None)
+    os.environ.pop("CLARIVATE_REVIEWER_LOCATOR_SCOPE", None)
+    os.environ.pop("CLARIVATE_REVIEWER_LOCATOR_BASE_URL", None)
+
+    if clarivate_base_url:
+        os.environ["CLARIVATE_REVIEWER_LOCATOR_BASE_URL"] = (
+            clarivate_base_url or "https://api.clarivate.com/api/wosrl"
+        )
+    if clarivate_auth_mode == "api_key" and clarivate_key:
+        os.environ["CLARIVATE_REVIEWER_LOCATOR_API_KEY"] = clarivate_key
+    elif clarivate_auth_mode == "bearer" and clarivate_bearer_token:
+        os.environ["CLARIVATE_REVIEWER_LOCATOR_ACCESS_TOKEN"] = clarivate_bearer_token
+    elif clarivate_auth_mode == "client_credentials" and clarivate_client_id and clarivate_client_secret and clarivate_token_url:
+        os.environ["CLARIVATE_REVIEWER_LOCATOR_CLIENT_ID"] = clarivate_client_id
+        os.environ["CLARIVATE_REVIEWER_LOCATOR_CLIENT_SECRET"] = clarivate_client_secret
+        os.environ["CLARIVATE_REVIEWER_LOCATOR_TOKEN_URL"] = clarivate_token_url
+        if clarivate_scope:
+            os.environ["CLARIVATE_REVIEWER_LOCATOR_SCOPE"] = clarivate_scope
+
     os.environ.pop("OPENAI_API_KEY", None)
     os.environ.pop("OPENAI_MODEL", None)
+    os.environ.pop("OPENAI_CHAT_COMPLETIONS_URL", None)
     os.environ.pop("LLM_PROVIDER", None)
     os.environ.pop("LOCAL_LLM_COMMAND", None)
-    os.environ.pop("LOCAL_LLM_COMMAND_TEMPLATE", None)
     os.environ.pop("LOCAL_LLM_MODEL", None)
-    os.environ.pop("OPENAI_CHAT_COMPLETIONS_URL", None)
     os.environ.pop("CODEX_CLI_COMMAND", None)
     os.environ.pop("CODEX_CLI_MODEL", None)
     os.environ.pop("CODEX_CLI_HOME", None)
@@ -281,47 +502,103 @@ def _apply_api_settings() -> None:
     if use_llm and llm_provider_value == "codex_cli":
         os.environ["LLM_PROVIDER"] = "codex_cli"
         os.environ["CODEX_CLI_COMMAND"] = local_llm_command or "codex"
-        os.environ["CODEX_CLI_HOME"] = os.path.expanduser("~/.codex")
         if llm_model:
             os.environ["CODEX_CLI_MODEL"] = llm_model
     elif use_llm and llm_provider_value == "local_cli":
         os.environ["LLM_PROVIDER"] = "local_cli"
         os.environ["LOCAL_LLM_COMMAND"] = local_llm_command or "ollama"
         os.environ["LOCAL_LLM_MODEL"] = llm_model or "llama3.1:8b"
-    elif use_llm and llm_provider_value == "custom_cli":
-        os.environ["LLM_PROVIDER"] = "custom_cli"
-        os.environ["LOCAL_LLM_COMMAND_TEMPLATE"] = local_llm_command
-        os.environ["LOCAL_LLM_MODEL"] = llm_model
     elif use_llm and openai_key:
         os.environ["LLM_PROVIDER"] = "openai"
         os.environ["OPENAI_API_KEY"] = openai_key
         os.environ["OPENAI_MODEL"] = llm_model or "gpt-4o-mini"
-        if openai_base_url:
-            os.environ["OPENAI_CHAT_COMPLETIONS_URL"] = openai_base_url
+        if openai_chat_completions_url:
+            os.environ["OPENAI_CHAT_COMPLETIONS_URL"] = openai_chat_completions_url
 
 
-def _default_llm_command(provider_key: str) -> str:
-    if provider_key == "codex_cli":
-        return "codex"
-    if provider_key == "local_cli":
-        return "ollama"
-    if provider_key == "custom_cli":
-        return "llm --model {model}"
-    return ""
+def _api_settings_keys() -> tuple[str, ...]:
+    return (
+        "openalex_contact_email",
+        "openalex_api_key",
+        "scopus_api_key",
+        "semantic_scholar_api_key",
+        "wiley_tdm_client_token",
+        "clarivate_auth_mode",
+        "clarivate_reviewer_locator_base_url",
+        "clarivate_reviewer_locator_api_key",
+        "clarivate_bearer_token",
+        "clarivate_client_id",
+        "clarivate_client_secret",
+        "clarivate_token_url",
+        "clarivate_scope",
+        "llm_provider",
+        "local_llm_command",
+        "llm_model",
+        "openai_api_key",
+        "openai_chat_completions_url",
+        "use_llm_assistance",
+    )
 
 
-def _default_llm_model(provider_key: str) -> str:
-    if provider_key == "local_cli":
-        return "llama3.1:8b"
-    if provider_key == "openai":
-        return "gpt-4o-mini"
-    return ""
+def _load_saved_api_settings_once() -> None:
+    if st.session_state.get("saved_api_settings_loaded"):
+        return
+    _load_saved_api_settings(force=True)
+    st.session_state["saved_api_settings_loaded"] = True
+
+
+def _load_saved_api_settings(force: bool = False) -> bool:
+    if not API_SETTINGS_PATH.exists():
+        return False
+    try:
+        data = json.loads(API_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    for key in _api_settings_keys():
+        if key in data and (force or key not in st.session_state):
+            st.session_state[key] = data[key]
+    return True
+
+
+def _save_api_settings() -> None:
+    API_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = {key: st.session_state.get(key, "") for key in _api_settings_keys()}
+    API_SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        API_SETTINGS_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _delete_saved_api_settings() -> bool:
+    try:
+        API_SETTINGS_PATH.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
+def _clarivate_configured() -> bool:
+    return bool(
+        os.getenv("CLARIVATE_REVIEWER_LOCATOR_API_KEY")
+        or os.getenv("CLARIVATE_REVIEWER_LOCATOR_ACCESS_TOKEN")
+        or (
+            os.getenv("CLARIVATE_REVIEWER_LOCATOR_CLIENT_ID")
+            and os.getenv("CLARIVATE_REVIEWER_LOCATOR_CLIENT_SECRET")
+            and os.getenv("CLARIVATE_REVIEWER_LOCATOR_TOKEN_URL")
+        )
+    )
 
 
 def render_reviewer_finder() -> None:
     st.header("Reviewer Finder")
 
     _render_pdf_upload()
+    _render_institution_exclusion_picker()
 
     with st.form("reviewer_finder_form"):
         journal_name = _journal_selectbox(
@@ -346,15 +623,6 @@ def render_reviewer_finder() -> None:
             "Author names to exclude",
             help="Enter one name per line.",
         )
-        excluded_institutions = st.text_area(
-            "Institutions to exclude",
-            help="Enter one institution per line.",
-        )
-        exclude_same_institution = st.checkbox(
-            "Exclude same institution",
-            value=True,
-            help="When enabled, candidates whose affiliation matches excluded institutions are suppressed. When disabled, they are flagged instead.",
-        )
         prioritize_editorial_board = st.checkbox(
             "Prioritize editorial board members",
             value=True,
@@ -375,8 +643,8 @@ def render_reviewer_finder() -> None:
             abstract=abstract,
             keywords=keywords,
             excluded_authors=excluded_authors,
-            excluded_institutions=excluded_institutions,
-            exclude_same_institution=exclude_same_institution,
+            excluded_institutions=_excluded_institutions_text(),
+            exclude_same_institution=True,
             prioritize_editorial_board=prioritize_editorial_board,
             require_english_publications=require_english_publications,
         )
@@ -387,6 +655,96 @@ def render_reviewer_finder() -> None:
     _render_reviewer_results()
 
 
+def _render_institution_exclusion_picker() -> None:
+    st.markdown("#### Institution exclusions")
+    st.caption(
+        "Manuscript PDFs usually do not include author institutions, so enter any "
+        "institutions you want to exclude manually."
+    )
+    query_col, selected_col = st.columns([1, 2])
+    with query_col:
+        query = st.text_input(
+            "Find institution",
+            key="institution_exclusion_query",
+            placeholder="Start typing an institution name",
+            help="Suggestions come from OpenAlex and affiliations already seen in this session.",
+        )
+    previous_selected = [
+        str(item).strip()
+        for item in st.session_state.get("excluded_institution_suggestions", [])
+        if str(item).strip()
+    ]
+    suggestions = []
+    for item in [*previous_selected, *_institution_suggestions(query)]:
+        if item not in suggestions:
+            suggestions.append(item)
+    with selected_col:
+        st.multiselect(
+            "Suggested institutions to exclude",
+            suggestions,
+            default=previous_selected,
+            key="excluded_institution_suggestions",
+            help="Select suggestions here, or type additional institutions below.",
+        )
+    st.text_area(
+        "Additional institutions to exclude",
+        value=st.session_state.get("excluded_institutions_manual", ""),
+        key="excluded_institutions_manual",
+        help="Enter one institution per line. Selected suggestions and these entries are both excluded.",
+    )
+
+
+def _excluded_institutions_text() -> str:
+    selected = st.session_state.get("excluded_institution_suggestions", [])
+    manual = st.session_state.get("excluded_institutions_manual", "")
+    entries = [str(item).strip() for item in selected if str(item).strip()]
+    entries.extend(item.strip() for item in manual.splitlines() if item.strip())
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        key = entry.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return "\n".join(deduped)
+
+
+def _institution_suggestions(query: str) -> list[str]:
+    local_suggestions = _local_institution_suggestions(query)
+    remote_suggestions = _cached_openalex_institution_suggestions(query)
+    merged: list[str] = []
+    for item in [*local_suggestions, *remote_suggestions]:
+        if item and item not in merged:
+            merged.append(item)
+    return merged[:12]
+
+
+def _local_institution_suggestions(query: str) -> list[str]:
+    query = query.casefold().strip()
+    if len(query) < 2:
+        return []
+    suggestions: list[str] = []
+    for candidate in st.session_state.get("reviewer_candidates", []):
+        values = [
+            getattr(candidate, "affiliation", None),
+            *getattr(candidate, "known_affiliations", []),
+        ]
+        for value in values:
+            if not value:
+                continue
+            for item in str(value).split(";"):
+                cleaned = item.strip()
+                if cleaned and query in cleaned.casefold() and cleaned not in suggestions:
+                    suggestions.append(cleaned)
+    return suggestions[:8]
+
+
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def _cached_openalex_institution_suggestions(query: str) -> list[str]:
+    return suggest_openalex_institutions(query)
+
+
 def _render_pdf_upload() -> None:
     uploaded_pdf = st.file_uploader(
         "Upload manuscript PDF to prefill fields",
@@ -395,6 +753,7 @@ def _render_pdf_upload() -> None:
     )
     if uploaded_pdf is None:
         return
+    _clear_reviewer_state_for_new_pdf(uploaded_pdf)
 
     if st.button("Extract fields from PDF"):
         try:
@@ -447,6 +806,37 @@ def _render_pdf_upload() -> None:
             ):
                 st.session_state.pop(key, None)
             st.rerun()
+
+
+def _clear_reviewer_state_for_new_pdf(uploaded_pdf) -> None:
+    signature = (
+        getattr(uploaded_pdf, "name", ""),
+        getattr(uploaded_pdf, "size", None),
+    )
+    previous_signature = st.session_state.get("reviewer_uploaded_pdf_signature")
+    if previous_signature in (None, signature):
+        st.session_state["reviewer_uploaded_pdf_signature"] = signature
+        return
+
+    for key in (
+        "reviewer_candidates",
+        "reviewer_search_input",
+        "reviewer_search_terms",
+        "reviewer_search_profile",
+        "reviewer_page",
+        "enriched_reviewer_names",
+        "reviewer_search_completed_message",
+        "reviewer_search_completed_at",
+        "pdf_extraction_notes",
+        "pdf_text_preview",
+        "pdf_page_previews",
+        "manuscript_title",
+        "manuscript_abstract",
+        "manuscript_keywords",
+    ):
+        st.session_state.pop(key, None)
+    st.session_state["reviewer_uploaded_pdf_signature"] = signature
+    st.info("New manuscript PDF detected. Previous extraction and reviewer search results were cleared.")
 
 
 def _run_reviewer_search(
@@ -577,7 +967,7 @@ def _render_reviewer_results() -> None:
 
     st.caption(
         f"Showing candidates {page_start + 1}-{page_end} of {total_candidates}. "
-        "Candidates are ordered by number of matching papers first."
+        "Candidates are ordered by recent matching papers first."
     )
     for candidate in page_candidates:
         _render_candidate_card(candidate, search_input)
@@ -649,7 +1039,8 @@ def _render_reviewer_filters(
     with col1:
         require_recent_keyword = st.checkbox(
             "Require recent keyword-overlap paper",
-            value=False,
+            value=True,
+            key="require_recent_keyword_filter",
             help="Only show candidates with at least one past-10-year paper whose title matches a manuscript keyword/search term.",
         )
     with col2:
@@ -661,7 +1052,21 @@ def _render_reviewer_filters(
         )
     with col3:
         include_early_career = st.checkbox("Include early-career researchers", value=True)
-        require_scopus_metrics = st.checkbox("Require Scopus metrics", value=False)
+        scopus_backed_count = sum(1 for candidate in candidates if _has_scopus_profile_id(candidate))
+        require_scopus_metrics = st.checkbox(
+            "Require Scopus author profile",
+            value=False,
+            disabled=scopus_backed_count == 0,
+            help=(
+                "Only show candidates for whom Scopus returned an author ID. "
+                "Scopus citation metrics can only be loaded for those candidates."
+            ),
+        )
+        st.caption(f"Scopus-backed candidates: {scopus_backed_count}")
+        if scopus_backed_count == 0:
+            st.caption(
+                "No Scopus author IDs were returned for this search, so this filter is disabled."
+            )
 
     filtered: list[ReviewerCandidate] = []
     selected_terms = [
@@ -680,7 +1085,7 @@ def _render_reviewer_filters(
             continue
         if require_recent_keyword and not candidate.keyword_match_last_10_years:
             continue
-        if require_scopus_metrics and not candidate.scopus_author_id:
+        if require_scopus_metrics and not _has_scopus_profile_id(candidate):
             continue
         if _is_early_career_candidate(candidate) and not include_early_career:
             continue
@@ -688,6 +1093,13 @@ def _render_reviewer_filters(
 
     st.caption(f"{len(filtered)} of {len(candidates)} candidates pass the filters.")
     return filtered
+
+
+def _has_scopus_profile_id(candidate: ReviewerCandidate) -> bool:
+    return bool(
+        candidate.scopus_author_id
+        or any(candidate.source_ids.get(source) for source in ("Scopus", "Scopus author"))
+    )
 
 
 def _candidate_filter_options(candidates: list[ReviewerCandidate]) -> list[str]:
@@ -815,6 +1227,15 @@ def _prepare_reviewer_candidates(
 ) -> list[ReviewerCandidate]:
     terms = _keyword_overlap_terms(search_input)
     strict_terms = _strict_paper_match_terms(search_input)
+    profile = build_reviewer_search_profile(search_input)
+    topic_terms = [
+        *[term.strip() for term in search_input.keywords if term.strip()],
+        *profile.key_topics,
+        *extract_search_terms(search_input),
+        *strict_terms,
+    ]
+    method_terms = profile.methods
+    population_terms = profile.populations_or_contexts
     llm_matches = analyze_paper_matches_with_llm(
         search_input,
         [
@@ -831,19 +1252,43 @@ def _prepare_reviewer_candidates(
         matching_papers: list = []
         for paper in candidate.matching_papers:
             matched = _matched_terms(paper.paper_title, strict_terms)
+            categories = _paper_match_categories(
+                paper.paper_title,
+                topic_terms,
+                method_terms,
+                population_terms,
+            )
             if matched:
                 paper.match_basis.append("keyword/title-word match")
             llm_match = llm_matches.get(_paper_match_key(paper.paper_title))
-            if llm_match and (llm_match.topic_match or llm_match.method_match):
-                paper.llm_topic_match = llm_match.topic_match
-                paper.llm_method_match = llm_match.method_match
-                paper.llm_match_rationale = llm_match.rationale
-                paper.match_basis.append("LLM abstract topic/method match")
+            if llm_match and (
+                llm_match.topic_match
+                or llm_match.method_match
+                or llm_match.population_match
+            ):
+                _safe_set_paper_attr(paper, "llm_topic_match", llm_match.topic_match)
+                _safe_set_paper_attr(paper, "llm_method_match", llm_match.method_match)
+                _safe_set_paper_attr(paper, "llm_population_match", llm_match.population_match)
+                _safe_set_paper_attr(paper, "llm_match_rationale", llm_match.rationale)
+                paper.match_basis.append("LLM abstract topic/method/population match")
+                if llm_match.topic_match:
+                    categories.append("topic content")
+                if llm_match.method_match:
+                    categories.append("method")
+                if llm_match.population_match:
+                    categories.append("population")
                 for term in llm_match.matched_terms:
                     if term not in matched:
                         matched.append(term)
             if not matched and not paper.match_basis:
                 continue
+            if not categories:
+                categories.append("topic content")
+            _safe_set_paper_attr(
+                paper,
+                "match_categories",
+                _dedupe_match_categories(categories),
+            )
             for term in matched:
                 if term not in paper.matched_keywords:
                     paper.matched_keywords.append(term)
@@ -867,12 +1312,12 @@ def _prepare_reviewer_candidates(
     return sorted(
         candidates,
         key=lambda candidate: (
+            _recent_keyword_overlap_count(candidate),
+            _recent_keyword_overlap_journal_article_count(candidate),
+            _recent_keyword_overlap_term_count(candidate),
             len(candidate.matching_papers),
             candidate.is_editorial_board_member,
             feedback_adjustment(candidate, search_input),
-            _recent_keyword_overlap_journal_article_count(candidate),
-            _recent_keyword_overlap_count(candidate),
-            _recent_keyword_overlap_term_count(candidate),
             candidate.scopus_author_id is not None,
             candidate.recent_activity_year or _latest_publication_year(candidate),
         ),
@@ -935,6 +1380,36 @@ def _matched_terms(text: str, terms: list[str]) -> list[str]:
         if re.search(pattern, text.casefold()):
             matches.append(term)
     return sorted(set(matches), key=str.casefold)
+
+
+def _paper_match_categories(
+    text: str,
+    topic_terms: list[str],
+    method_terms: list[str],
+    population_terms: list[str],
+) -> list[str]:
+    categories: list[str] = []
+    if _matched_terms(text, topic_terms):
+        categories.append("topic content")
+    if _matched_terms(text, method_terms):
+        categories.append("method")
+    if _matched_terms(text, population_terms):
+        categories.append("population")
+    return categories
+
+
+def _dedupe_match_categories(categories: list[str]) -> list[str]:
+    ordered = ["topic content", "method", "population"]
+    normalized = {category.casefold().strip() for category in categories if category}
+    return [category for category in ordered if category in normalized]
+
+
+def _safe_set_paper_attr(paper, attr: str, value) -> None:
+    try:
+        setattr(paper, attr, value)
+    except ValueError:
+        # Streamlit can keep old Pydantic objects in session state across code reloads.
+        paper.__dict__[attr] = value
 
 
 def _paper_match_key(title: str) -> str:
@@ -1042,6 +1517,27 @@ def _render_candidate_card(
                     st.markdown(
                         f"[Identity verification source]({candidate.identity_verification_url})"
                     )
+                profile_urls = getattr(candidate, "profile_urls", {})
+                known_affiliations = getattr(candidate, "known_affiliations", [])
+                known_aliases = getattr(candidate, "known_aliases", [])
+                if profile_urls:
+                    profile_links = [
+                        f"[{label}]({url})"
+                        for label, url in profile_urls.items()
+                        if url
+                    ]
+                    if profile_links:
+                        st.markdown("Profiles: " + " | ".join(profile_links))
+                if known_affiliations:
+                    st.caption(
+                        "Known affiliations from author profiles: "
+                        + "; ".join(known_affiliations[:3])
+                    )
+                if known_aliases:
+                    st.caption(
+                        "Known name variants: "
+                        + ", ".join(known_aliases[:5])
+                    )
                 if candidate.is_editorial_board_member and candidate.editorial_board_source:
                     st.markdown(f"[Board evidence]({candidate.editorial_board_source})")
                 if st.button("Find affiliation/title/email", key=f"contact_{_candidate_key(candidate)}"):
@@ -1143,7 +1639,7 @@ def _render_candidate_card(
             if not llm_enabled():
                 st.caption(
                     "LLM regeneration is disabled until LLM assistance is enabled "
-                    "with an OpenAI-compatible API, custom CLI, Codex CLI, or local CLI in settings."
+                    "with Codex CLI, Local CLI, or an OpenAI-compatible API in settings."
                 )
         with st.expander("Teach the search"):
             _render_candidate_feedback(candidate, search_input)
@@ -1174,8 +1670,8 @@ def _render_candidate_feedback(
     search_input: ReviewerSearchInput,
 ) -> None:
     st.caption(
-        "This stores local feedback and adjusts future result ordering for the "
-        "same reviewer or similar topic terms. It does not remove publication evidence."
+        "This stores local, manuscript-specific feedback. It adjusts future ordering "
+        "only when a later search resembles this paper's topic, method, or population context."
     )
     feedback_key = _candidate_key(candidate)
     with st.form(f"feedback_{feedback_key}"):
@@ -1185,6 +1681,15 @@ def _render_candidate_feedback(
             horizontal=True,
             key=f"feedback_label_{feedback_key}",
         )
+        reasons = st.multiselect(
+            "Why? Optional, but improves learning",
+            FEEDBACK_REASONS,
+            key=f"feedback_reasons_{feedback_key}",
+            help=(
+                "Use these to teach conditional relevance. For example, 'wrong method' "
+                "penalizes similar method mismatches, not the reviewer globally."
+            ),
+        )
         note = st.text_input(
             "Optional note",
             placeholder="e.g., wrong method area, too clinical, good regional fit",
@@ -1192,8 +1697,9 @@ def _render_candidate_feedback(
         )
         submitted = st.form_submit_button("Save feedback")
     if submitted:
-        record_candidate_feedback(candidate, search_input, label, note)
-        st.toast(f"Feedback saved: {candidate.name} marked {label}.", icon="✅")
+        record_candidate_feedback(candidate, search_input, label, reasons, note)
+        reason_text = f" ({', '.join(reasons)})" if reasons else ""
+        st.toast(f"Feedback saved: {candidate.name} marked {label}{reason_text}.", icon="✅")
         st.rerun()
 
 
@@ -1207,6 +1713,7 @@ def _render_paper_snippet(paper) -> None:
         st.markdown(f"- [{paper.paper_title}]({paper_link}) ({year})")
     else:
         st.markdown(f"- {paper.paper_title} ({year})")
+    _render_match_category_labels(paper)
     st.caption(f"{journal}{matched}{basis}")
 
 
@@ -1214,6 +1721,7 @@ def _render_paper_evidence(paper) -> None:
     paper_link = paper.url or paper.doi or paper.openalex_url
     year = paper.publication_year or "Year unavailable"
     st.markdown(f"- [{paper.paper_title}]({paper_link}) ({year})")
+    _render_match_category_labels(paper)
     st.caption(f"Journal/source: {paper.journal_name or 'Unavailable'}")
     st.caption(f"Publication type: {paper.publication_type or 'Unavailable'}")
     st.caption(f"Language: {paper.publication_language or 'Unavailable'}")
@@ -1231,6 +1739,31 @@ def _render_paper_evidence(paper) -> None:
     if paper.llm_match_rationale:
         st.caption(f"LLM abstract rationale: {paper.llm_match_rationale}")
     st.caption(f"Evidence link: {paper_link}")
+
+
+def _render_match_category_labels(paper) -> None:
+    categories = getattr(paper, "match_categories", None) or ["topic content"]
+    styles = {
+        "topic content": ("#dbeafe", "#1e40af", "#bfdbfe"),
+        "method": ("#dcfce7", "#166534", "#bbf7d0"),
+        "population": ("#ffedd5", "#9a3412", "#fed7aa"),
+    }
+    labels = []
+    for category in _dedupe_match_categories(list(categories)) or ["topic content"]:
+        background, color, border = styles.get(category, ("#f1f5f9", "#334155", "#cbd5e1"))
+        label = {
+            "topic content": "Topic content",
+            "method": "Method",
+            "population": "Population",
+        }.get(category, category.title())
+        labels.append(
+            "<span style=\""
+            f"background:{background};color:{color};border:1px solid {border};"
+            "border-radius:999px;padding:2px 8px;margin-right:6px;"
+            "font-size:0.78rem;font-weight:600;white-space:nowrap;"
+            f"\">{label}</span>"
+        )
+    st.markdown("".join(labels), unsafe_allow_html=True)
 
 
 def _recent_keyword_overlap_papers(candidate: ReviewerCandidate):
@@ -1911,13 +2444,13 @@ def _journal_selectbox(label: str, key: str) -> str:
 
 
 def _set_journal_name(journal_name: str) -> str:
-    supported_name = journal_name.strip()
-    st.session_state["journal_name"] = supported_name
+    journal_name = journal_name.strip()
+    st.session_state["journal_name"] = journal_name
     st.session_state["journal_sync_keys"] = {
         "reviewer_journal_name",
         "decision_journal_name",
     }
-    return supported_name
+    return journal_name
 
 
 def main() -> None:

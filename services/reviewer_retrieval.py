@@ -15,7 +15,15 @@ STOPWORDS = {
     "model", "paper", "results", "study", "that", "their", "these", "this",
     "through", "using", "with", "within",
 }
-SOURCE_NAMES = ("OpenAlex", "Semantic Scholar", "Scopus", "Crossref", "ORCID", "PubMed")
+SOURCE_NAMES = (
+    "OpenAlex",
+    "Semantic Scholar",
+    "Scopus",
+    "Clarivate Reviewer Locator",
+    "Crossref",
+    "ORCID",
+    "PubMed",
+)
 
 
 class ReviewerSearchInput(BaseModel):
@@ -27,6 +35,7 @@ class ReviewerSearchInput(BaseModel):
 class CandidateEvidence(BaseModel):
     reviewer_name: str = ""
     affiliation: str | None = None
+    email: str | None = None
     source: str
     paper_title: str
     abstract: str | None = None
@@ -40,8 +49,10 @@ class CandidateEvidence(BaseModel):
     citation_count: int | None = None
     matched_keywords: list[str] = Field(default_factory=list)
     match_basis: list[str] = Field(default_factory=list)
+    match_categories: list[str] = Field(default_factory=list)
     llm_topic_match: bool | None = None
     llm_method_match: bool | None = None
+    llm_population_match: bool | None = None
     llm_match_rationale: str = ""
     orcid: str | None = None
     openalex_author_id: str | None = None
@@ -51,6 +62,7 @@ class CandidateEvidence(BaseModel):
     semantic_scholar_paper_id: str | None = None
     scopus_eid: str | None = None
     pubmed_id: str | None = None
+    clarivate_reviewer_id: str | None = None
 
 
 ReviewerEvidence = CandidateEvidence
@@ -74,6 +86,9 @@ class ReviewerCandidate(BaseModel):
     semantic_scholar_author_id: str | None = None
     scopus_author_id: str | None = None
     source_ids: dict[str, list[str]] = Field(default_factory=dict)
+    profile_urls: dict[str, str] = Field(default_factory=dict)
+    known_aliases: list[str] = Field(default_factory=list)
+    known_affiliations: list[str] = Field(default_factory=list)
     source_coverage: dict[str, bool] = Field(default_factory=dict)
     conflict_flags: list[str] = Field(default_factory=list)
     evidence_summary: str = ""
@@ -197,6 +212,9 @@ def _fallback_same_person(candidate: ReviewerCandidate, evidence: CandidateEvide
 def _merge_evidence(candidate: ReviewerCandidate, evidence: CandidateEvidence) -> None:
     if not candidate.affiliation and evidence.affiliation:
         candidate.affiliation = evidence.affiliation
+    if not candidate.email and evidence.email:
+        candidate.email = evidence.email
+        candidate.email_status = f"Provided by {evidence.source}; verify before use."
     candidate.orcid = candidate.orcid or evidence.orcid
     candidate.source_openalex_author_id = candidate.source_openalex_author_id or evidence.openalex_author_id
     candidate.semantic_scholar_author_id = candidate.semantic_scholar_author_id or evidence.semantic_scholar_author_id
@@ -207,6 +225,7 @@ def _merge_evidence(candidate: ReviewerCandidate, evidence: CandidateEvidence) -
     _add_source_id(candidate, "Semantic Scholar", evidence.semantic_scholar_author_id)
     _add_source_id(candidate, "Scopus", evidence.scopus_author_id)
     _add_source_id(candidate, "Scopus", evidence.scopus_eid)
+    _add_source_id(candidate, "Clarivate Reviewer Locator", evidence.clarivate_reviewer_id)
     _add_source_id(candidate, "PubMed", evidence.pubmed_id)
     _add_source_id(candidate, evidence.source, evidence.doi or evidence.url)
 
@@ -216,7 +235,7 @@ def _merge_evidence(candidate: ReviewerCandidate, evidence: CandidateEvidence) -
     if evidence.orcid:
         candidate.source_coverage["ORCID"] = True
 
-    evidence_id = evidence.doi or evidence.openalex_work_id or evidence.semantic_scholar_paper_id or evidence.scopus_eid or evidence.pubmed_id or evidence.url or evidence.paper_title
+    evidence_id = evidence.doi or evidence.openalex_work_id or evidence.semantic_scholar_paper_id or evidence.scopus_eid or evidence.pubmed_id or evidence.clarivate_reviewer_id or evidence.url or evidence.paper_title
     if evidence_id not in candidate.publication_ids:
         candidate.publication_ids.append(evidence_id)
         candidate.matching_papers.append(evidence)

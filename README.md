@@ -2,17 +2,22 @@
 
 A local Streamlit app for journal editors. It helps identify evidence-backed reviewer candidates, draft reviewer invitations, synthesize reviewer comments, audit revision responses across rounds, and draft decision-justification paragraphs.
 
-Current release candidate: `v0.1.0-alpha`
+Current release candidate: `v0.2.0-alpha`
 
 ## Features
 
-- Reviewer Finder tab with manuscript details, keyword input, exclusion lists, and evidence-backed reviewer candidates.
-- Decision Assistant tab with manuscript details and reviewer comments.
+- Reviewer Finder tab with manuscript details, keyword input, author/institution exclusion lists, and evidence-backed reviewer candidates.
+- Decision Assistant tab with manuscript details, manuscript/response PDF uploads, multiple reviewer comments, reviewer recommendations, and editor-selected highlights for decision text.
 - Separate service modules for retrieval, citation metrics, conflict checks, drafting, comment parsing, memos, and decision letters.
-- OpenAlex-backed reviewer retrieval with normalized evidence from Semantic Scholar, Scopus, Crossref, ORCID, and PubMed when available.
+- OpenAlex-backed reviewer retrieval with normalized evidence from Semantic Scholar, Scopus, Clarivate Reviewer Locator, Crossref, ORCID, and PubMed when available.
+- Optional OpenAlex contact email/API key, Scopus API key, Semantic Scholar API key, Clarivate credentials, and Wiley TDM token fields in the app.
 - Optional Scopus retrieval and citation enrichment when a Scopus API key is configured.
-- Optional Semantic Scholar API key entry for more reliable Semantic Scholar author and citation enrichment.
+- Semantic Scholar author enrichment can show profile URLs, known affiliations, aliases, publication counts, citation counts, h-index, and external IDs when available.
+- Matched papers are labeled by match type: topic content, method, and population/context.
+- Candidate ordering prioritizes recent matching papers, journal articles, more overlapping terms, editorial feedback, Scopus-backed profiles, and recent activity.
 - Synonym-aware matched-keyword filtering, including groups such as aging/ageing/older adults and well-being/wellbeing.
+- Conditional local feedback learning lets users mark candidates useful/irrelevant for a specific manuscript context, with reasons such as wrong topic, wrong method, or wrong population/context.
+- Institution-exclusion suggestions use OpenAlex institution search plus affiliations already seen in the current session.
 - English-publication filtering is enabled by default and can be turned off by the user.
 - PDF field extraction to prefill manuscript fields before editing.
 - Decision Assistant statistical audit with a lightweight statcheck-style p-value consistency scan for APA-style test reports.
@@ -33,6 +38,10 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+On macOS, users can also double-click `Start Journal Editorial Assistant.command`.
+The launcher creates a local `.venv` on first use, installs requirements once,
+opens `http://localhost:8501/`, and reuses the environment on later launches.
+
 ## Project Structure
 
 ```text
@@ -46,6 +55,7 @@ services/
   decision_letter_drafting.py
   editorial_memo_drafting.py
   identity_verification.py
+  institution_suggestions.py
   invitation_opener_drafting.py
   journal_editorial_board.py
   llm_assist.py
@@ -70,6 +80,7 @@ OpenAlex is the backbone for reviewer discovery. The app also attempts to collec
 
 - Semantic Scholar Academic Graph API
 - Scopus Search and Author APIs
+- Clarivate Reviewer Locator API
 - Crossref REST API
 - ORCID public API enrichment
 - PubMed / NCBI E-utilities
@@ -100,6 +111,18 @@ streamlit run app.py
 
 You can also paste the Semantic Scholar key into the app under **API and LLM settings**.
 
+## Other Optional API Settings
+
+The **API and LLM settings** panel also supports:
+
+- OpenAlex contact email and optional OpenAlex API key.
+- Clarivate Reviewer Locator credentials by API key, bearer token, or client credentials.
+- Wiley TDM client token for future Wiley full-text enrichment by DOI.
+
+Keys entered in the app are used for the running session. Users may optionally
+save settings locally outside the project folder at their operating system's
+application-support path.
+
 ### Scopus Author Diagnostics
 
 To inspect what Scopus returns for a specific author, set `SCOPUS_API_KEY` in
@@ -115,7 +138,7 @@ present.
 
 ## Optional LLM Assistance
 
-The app works without an LLM. It can use an OpenAI-compatible chat completions endpoint, a custom CLI command, Codex CLI, or an Ollama-style local CLI conservatively for:
+The app works without an LLM. It can use an OpenAI-compatible chat completions endpoint, Codex CLI, or an Ollama-style local CLI conservatively for:
 
 - Expanding manuscript details into multiple scholarly metadata search queries.
 - Extracting PDF fields, including target/submitted journal name when explicitly present in the PDF text.
@@ -135,15 +158,15 @@ streamlit run app.py
 
 The LLM is instructed not to guess journal names, titles, keywords, reviewer evidence, or reviewer contact details.
 
-### Custom CLI LLM
+### LLM Policy Caution
 
-Choose **Custom CLI** if you have a command-line LLM that reads the prompt from stdin and writes the answer to stdout. Enter a command template such as:
-
-```bash
-llm --model {model}
-```
-
-The `{model}` placeholder is replaced by the model field in the app.
+Before enabling LLM assistance with manuscript files, reviewer comments, author
+responses, or other confidential editorial material, users should check the
+relevant journal, publisher, society, funder, institutional, and platform
+policies. Some editorial workflows may restrict or prohibit uploading,
+transmitting, or processing unpublished manuscript or peer-review content with
+external AI systems. When in doubt, use the non-LLM workflow or a locally
+approved model/environment.
 
 ### Codex CLI LLM
 
