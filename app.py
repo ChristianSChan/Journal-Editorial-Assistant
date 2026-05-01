@@ -2433,7 +2433,6 @@ def _journal_selectbox(label: str, key: str) -> str:
     selected_journal = st.session_state.get(key, st.session_state.get("journal_name", ""))
     if key in pending_sync_keys:
         selected_journal = st.session_state.get("journal_name", selected_journal)
-        st.session_state[key] = selected_journal
         pending_sync_keys.discard(key)
         st.session_state["journal_sync_keys"] = pending_sync_keys
     return st.text_input(

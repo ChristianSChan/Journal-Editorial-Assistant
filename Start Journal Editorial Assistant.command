@@ -49,6 +49,13 @@ echo "Opening app at $APP_URL"
 echo "Keep this Terminal window open while using the app."
 echo
 
+if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:8501 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "The app already appears to be running on port 8501."
+  open "$APP_URL"
+  echo "Opened the existing app in your browser."
+  exit 0
+fi
+
 (sleep 3; open "$APP_URL") &
 
 python -m streamlit run app.py --server.port 8501 --server.address localhost

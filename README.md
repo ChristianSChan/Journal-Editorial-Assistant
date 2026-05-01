@@ -4,6 +4,26 @@ A local Streamlit app for journal editors. It helps identify evidence-backed rev
 
 Current release candidate: `v0.2.0-alpha`
 
+## Positioning
+
+Journal Editorial Assistant is built for editors who want more transparent,
+evidence-based reviewer discovery than many built-in manuscript-system search
+tools provide.
+
+Publisher reviewer systems can be useful for workflow integration, reviewer
+history, and contact data. However, they can also produce noisy candidate lists
+with false positives and limited visibility into why a reviewer is suggested.
+
+This app takes a different approach: every reviewer candidate must be backed by
+visible publication evidence. Matched papers are shown directly, labeled by
+topic, method, and population/context fit, and prioritized by recent relevance.
+Editors can also give manuscript-specific feedback, helping the tool learn which
+kinds of matches are useful or irrelevant for future searches.
+
+The goal is not just to find more names. The goal is to help editors identify
+better-justified reviewer candidates, understand the evidence behind each match,
+and reduce time spent sorting through weak recommendations.
+
 ## Features
 
 - Reviewer Finder tab with manuscript details, keyword input, author/institution exclusion lists, and evidence-backed reviewer candidates.
