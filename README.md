@@ -44,7 +44,7 @@ and reduce time spent sorting through weak recommendations.
 - Local decision-record storage for later review rounds, so prior concerns can be loaded and checked against authors' responses.
 - Generic journal-name entry. No journal-specific board lists or private defaults are bundled in this public template.
 
-## Setup
+## Setup for Non-Technical Users
 
 ### macOS
 
@@ -57,7 +57,33 @@ Keep the Terminal window open while using the app.
 If macOS blocks the launcher the first time, right-click it, choose **Open**,
 and approve it.
 
-### Manual Terminal Setup
+### Windows
+
+Double-click `Start Journal Editorial Assistant.bat`.
+
+On first launch, the launcher creates a local `.venv`, installs the required
+packages, starts Streamlit, and opens `http://localhost:8501/` in your browser.
+Keep the Command Prompt window open while using the app.
+
+If Windows asks whether to allow the file to run, choose the option to run it.
+If Python is not installed, install Python 3 from
+[python.org](https://www.python.org/downloads/) and check **Add python.exe to
+PATH** during installation.
+
+### If the Browser Does Not Open
+
+After starting the app, manually open:
+
+```text
+http://localhost:8501/
+```
+
+## Manual Terminal Setup
+
+Use these commands only if the double-click launcher does not work or if you
+prefer Terminal/Command Prompt.
+
+### macOS / Linux
 
 ```bash
 python -m venv .venv
@@ -65,9 +91,25 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### Windows
+
+```bat
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
 ## Manual Run
 
+### macOS / Linux
+
 ```bash
+streamlit run app.py
+```
+
+### Windows
+
+```bat
 streamlit run app.py
 ```
 
