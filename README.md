@@ -44,11 +44,42 @@ and reduce time spent sorting through weak recommendations.
 - Local decision-record storage for later review rounds, so prior concerns can be loaded and checked against authors' responses.
 - Generic journal-name entry. No journal-specific board lists or private defaults are bundled in this public template.
 
-## Setup for Non-Technical Users
+## Installation Guide for Non-Technical Users
+
+### Step 1: Download the App
+
+1. Go to the GitHub release page for this project.
+2. Download the source code ZIP file for the latest release.
+3. Unzip the downloaded file.
+4. Move the unzipped folder somewhere easy to find, such as your Desktop or Documents folder.
+
+### Step 2: Install Python
+
+The app needs Python 3.
+
+#### macOS
+
+1. Open [python.org/downloads](https://www.python.org/downloads/).
+2. Download the latest Python 3 installer for macOS.
+3. Open the installer and follow the prompts.
+
+#### Windows
+
+1. Open [python.org/downloads](https://www.python.org/downloads/).
+2. Download the latest Python 3 installer for Windows.
+3. Open the installer.
+4. Important: check **Add python.exe to PATH** before clicking Install.
+5. Finish the installation.
+
+### Step 3: Start the App
 
 ### macOS
 
-Double-click `Start Journal Editorial Assistant.command`.
+In the app folder, double-click:
+
+```text
+Start Journal Editorial Assistant.command
+```
 
 On first launch, the launcher creates a local `.venv`, installs the required
 packages, starts Streamlit, and opens `http://localhost:8501/` in your browser.
@@ -59,24 +90,58 @@ and approve it.
 
 ### Windows
 
-Double-click `Start Journal Editorial Assistant.bat`.
+In the app folder, double-click:
+
+```text
+Start Journal Editorial Assistant.bat
+```
 
 On first launch, the launcher creates a local `.venv`, installs the required
 packages, starts Streamlit, and opens `http://localhost:8501/` in your browser.
 Keep the Command Prompt window open while using the app.
 
 If Windows asks whether to allow the file to run, choose the option to run it.
-If Python is not installed, install Python 3 from
-[python.org](https://www.python.org/downloads/) and check **Add python.exe to
-PATH** during installation.
 
-### If the Browser Does Not Open
+### Step 4: Use the App
 
-After starting the app, manually open:
+Keep the Terminal or Command Prompt window open while using the app. Closing
+that window stops the app.
+
+The app runs locally on your computer. The app page is:
 
 ```text
 http://localhost:8501/
 ```
+
+If the browser does not open automatically, copy and paste that address into
+your browser.
+
+### Later Launches
+
+After the first launch, the app should start faster because the required
+packages are already installed in the local `.venv` folder. To use the app
+again, double-click the same launcher file.
+
+### Common First-Launch Issues
+
+#### macOS says the app cannot be opened
+
+Right-click `Start Journal Editorial Assistant.command`, choose **Open**, and
+approve it.
+
+#### Windows says Python was not found
+
+Install Python from [python.org/downloads](https://www.python.org/downloads/).
+During installation, make sure **Add python.exe to PATH** is checked.
+
+#### The browser says the site cannot be reached
+
+```text
+http://localhost:8501/
+```
+
+Make sure the Terminal or Command Prompt window is still open. If it closed,
+double-click the launcher again.
 
 ## Manual Terminal Setup
 
