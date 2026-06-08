@@ -4,7 +4,6 @@ setlocal
 cd /d "%~dp0"
 
 set APP_URL=http://localhost:8501/
-set INSTALL_MARKER=.venv\.requirements-installed
 
 echo Starting Journal Editorial Assistant...
 echo Project folder: %cd%
@@ -31,23 +30,18 @@ if not exist ".venv" (
 
 call ".venv\Scripts\activate.bat"
 
-if not exist "%INSTALL_MARKER%" (
-  echo First launch: installing required packages...
-  python -m pip install --upgrade pip
-  if errorlevel 1 (
-    echo Could not update pip.
-    pause
-    exit /b 1
-  )
-  python -m pip install -r requirements.txt
-  if errorlevel 1 (
-    echo Could not install required packages.
-    pause
-    exit /b 1
-  )
-  type nul > "%INSTALL_MARKER%"
-) else (
-  echo Using existing local Python environment.
+echo Checking required packages...
+python -m pip install --upgrade pip
+if errorlevel 1 (
+  echo Could not update pip.
+  pause
+  exit /b 1
+)
+python -m pip install -r requirements.txt
+if errorlevel 1 (
+  echo Could not install required packages.
+  pause
+  exit /b 1
 )
 
 echo.

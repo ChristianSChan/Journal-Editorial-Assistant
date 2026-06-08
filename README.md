@@ -81,7 +81,7 @@ In the app folder, double-click:
 Start Journal Editorial Assistant.command
 ```
 
-On first launch, the launcher creates a local `.venv`, installs the required
+On first launch, the launcher creates a local `.venv`, checks the required
 packages, starts Streamlit, and opens `http://localhost:8501/` in your browser.
 Keep the Terminal window open while using the app.
 
@@ -96,7 +96,7 @@ In the app folder, double-click:
 Start Journal Editorial Assistant.bat
 ```
 
-On first launch, the launcher creates a local `.venv`, installs the required
+On first launch, the launcher creates a local `.venv`, checks the required
 packages, starts Streamlit, and opens `http://localhost:8501/` in your browser.
 Keep the Command Prompt window open while using the app.
 
@@ -118,9 +118,11 @@ your browser.
 
 ### Later Launches
 
-After the first launch, the app should start faster because the required
-packages are already installed in the local `.venv` folder. To use the app
-again, double-click the same launcher file.
+After the first launch, the app should start faster because most required
+packages are already installed in the local `.venv` folder. The launcher still
+checks requirements each time so app updates can add small compatibility fixes
+without asking users to delete or rebuild `.venv`. To use the app again,
+double-click the same launcher file.
 
 ### Common First-Launch Issues
 

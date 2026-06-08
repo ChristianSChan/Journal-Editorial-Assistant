@@ -3,7 +3,6 @@
 cd "$(dirname "$0")" || exit 1
 
 APP_URL="http://localhost:8501/"
-INSTALL_MARKER=".venv/.requirements-installed"
 
 finish() {
   status=$?
@@ -35,14 +34,9 @@ fi
 
 source ".venv/bin/activate"
 
-if [ ! -f "$INSTALL_MARKER" ]; then
-  echo "First launch: installing required packages..."
-  python -m pip install --upgrade pip
-  python -m pip install -r requirements.txt || exit 1
-  touch "$INSTALL_MARKER"
-else
-  echo "Using existing local Python environment."
-fi
+echo "Checking required packages..."
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt || exit 1
 
 echo
 echo "Opening app at $APP_URL"
