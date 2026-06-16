@@ -51,7 +51,7 @@ class LlmExtractedManuscriptFields(BaseModel):
 
 def build_reviewer_search_profile(search_input: ReviewerSearchInput) -> ReviewerSearchProfile:
     """Build multiple source-ready queries, using an LLM only when configured."""
-    return _build_reviewer_search_profile_cached(
+    profile = _build_reviewer_search_profile_cached(
         search_input.title,
         search_input.abstract,
         tuple(search_input.keywords),
@@ -59,6 +59,26 @@ def build_reviewer_search_profile(search_input: ReviewerSearchInput) -> Reviewer
         _provider_model_cache_key(),
         llm_enabled(),
     )
+    if not search_input.reference_queries:
+        return profile
+
+    enriched_profile = profile.model_copy(deep=True)
+    added = 0
+    existing = {query.casefold() for query in enriched_profile.queries}
+    for query in search_input.reference_queries:
+        cleaned = _clean_text(query, max_length=220)
+        if not cleaned or cleaned.casefold() in existing:
+            continue
+        enriched_profile.queries.append(cleaned)
+        existing.add(cleaned.casefold())
+        added += 1
+        if len(enriched_profile.queries) >= MAX_QUERY_COUNT + 6:
+            break
+    if added:
+        enriched_profile.notes.append(
+            f"Added {added} recent relevant reference-title quer{'y' if added == 1 else 'ies'} from uploaded PDF."
+        )
+    return enriched_profile
 
 
 @lru_cache(maxsize=64)

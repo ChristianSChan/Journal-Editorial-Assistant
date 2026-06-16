@@ -30,6 +30,7 @@ class ReviewerSearchInput(BaseModel):
     title: str = ""
     abstract: str = ""
     keywords: list[str] = Field(default_factory=list)
+    reference_queries: list[str] = Field(default_factory=list)
 
 
 class CandidateEvidence(BaseModel):

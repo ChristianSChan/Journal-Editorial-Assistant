@@ -40,7 +40,11 @@ from services.journal_editorial_board import (
 )
 from services.llm_provider import llm_enabled, llm_status_label
 from services.llm_assist import build_reviewer_search_profile
-from services.pdf_extraction import extract_manuscript_fields_from_pdf, extract_pdf_text
+from services.pdf_extraction import (
+    extract_manuscript_fields_from_pdf,
+    extract_pdf_text,
+    extract_reference_queries_from_pdf,
+)
 from services.paper_match_analysis import analyze_paper_matches_with_llm
 from services.reviewer_retrieval import (
     ReviewerCandidate,
@@ -279,6 +283,11 @@ def render_api_settings() -> None:
             clarivate_bearer_token = ""
 
         st.markdown("**LLM assistance**")
+        st.warning(
+            "Privacy note: PDF contents are processed locally by default. If LLM assistance is enabled, "
+            "extracted manuscript text, reviewer comments, or author-response text may be sent to the "
+            "selected LLM provider for the requested task."
+        )
         _, provider_col = st.columns(2)
         with provider_col:
             saved_provider = st.session_state.get("llm_provider", "codex_cli")
@@ -746,6 +755,11 @@ def _cached_openalex_institution_suggestions(query: str) -> list[str]:
 
 
 def _render_pdf_upload() -> None:
+    st.info(
+        "Privacy: uploaded PDFs are parsed locally for field extraction and reference mining. "
+        "Full PDF contents are not sent to OpenAI or another LLM provider unless you enable "
+        "LLM assistance in settings."
+    )
     uploaded_pdf = st.file_uploader(
         "Upload manuscript PDF to prefill fields",
         type=["pdf"],
@@ -757,7 +771,8 @@ def _render_pdf_upload() -> None:
 
     if st.button("Extract fields from PDF"):
         try:
-            extracted = extract_manuscript_fields_from_pdf(uploaded_pdf.getvalue())
+            pdf_bytes = uploaded_pdf.getvalue()
+            extracted = extract_manuscript_fields_from_pdf(pdf_bytes)
         except Exception as exc:  # PDF parsing can fail on malformed or scanned files.
             st.error(f"Could not extract text from PDF: {exc}")
             return
@@ -774,6 +789,23 @@ def _render_pdf_upload() -> None:
         st.session_state["pdf_extraction_notes"] = extracted.notes
         st.session_state["pdf_text_preview"] = extracted.text_preview
         st.session_state["pdf_page_previews"] = extracted.page_previews
+
+        try:
+            reference_queries = extract_reference_queries_from_pdf(
+                pdf_bytes,
+                manuscript_title=extracted.title,
+                abstract=extracted.abstract,
+                keywords=extracted.keywords,
+            )
+            st.session_state["pdf_reference_queries"] = [
+                item.model_dump() for item in reference_queries.queries
+            ]
+            st.session_state["pdf_reference_notes"] = reference_queries.notes
+        except Exception as exc:
+            st.session_state["pdf_reference_queries"] = []
+            st.session_state["pdf_reference_notes"] = [
+                f"Reference mining skipped because the reference section could not be parsed: {exc}"
+            ]
         st.success("PDF fields extracted. Review and edit them below before searching.")
 
     page_previews = st.session_state.get("pdf_page_previews", [])
@@ -797,12 +829,28 @@ def _render_pdf_upload() -> None:
             for note in notes:
                 st.caption(note)
 
-    if page_previews or preview or notes:
+    reference_queries = st.session_state.get("pdf_reference_queries", [])
+    reference_notes = st.session_state.get("pdf_reference_notes", [])
+    if reference_queries or reference_notes:
+        with st.expander("Reference-derived reviewer search queries"):
+            for note in reference_notes:
+                st.caption(note)
+            for item in reference_queries:
+                title = item.get("title", "Untitled reference")
+                year = item.get("year") or "year unknown"
+                journal = item.get("journal") or "journal unknown"
+                terms = ", ".join(item.get("matched_terms", [])) or "title/domain match"
+                st.markdown(f"- **{title}** ({year}, {journal})")
+                st.caption(f"Matched manuscript terms: {terms}")
+
+    if page_previews or preview or notes or reference_queries or reference_notes:
         if st.button("Clear uploaded PDF extraction"):
             for key in (
                 "pdf_extraction_notes",
                 "pdf_text_preview",
                 "pdf_page_previews",
+                "pdf_reference_queries",
+                "pdf_reference_notes",
             ):
                 st.session_state.pop(key, None)
             st.rerun()
@@ -830,6 +878,8 @@ def _clear_reviewer_state_for_new_pdf(uploaded_pdf) -> None:
         "pdf_extraction_notes",
         "pdf_text_preview",
         "pdf_page_previews",
+        "pdf_reference_queries",
+        "pdf_reference_notes",
         "manuscript_title",
         "manuscript_abstract",
         "manuscript_keywords",
@@ -859,6 +909,11 @@ def _run_reviewer_search(
         title=title,
         abstract=abstract,
         keywords=[item.strip() for item in keywords.split(",") if item.strip()],
+        reference_queries=[
+            item.get("title", "")
+            for item in st.session_state.get("pdf_reference_queries", [])
+            if item.get("title")
+        ],
     )
     conflict_input = ConflictCheckInput(
         excluded_author_names=[
@@ -1817,6 +1872,11 @@ def render_decision_assistant() -> None:
     st.caption(
         "Upload available PDFs, enter reviewer recommendations/comments, then generate an "
         "editorial recommendation and decision-justification paragraphs."
+    )
+    st.info(
+        "Privacy: uploaded manuscript and response PDFs are extracted locally. If LLM assistance "
+        "is enabled, extracted text and reviewer comments may be sent to the selected LLM provider "
+        "for decision analysis."
     )
 
     _render_previous_round_loader()

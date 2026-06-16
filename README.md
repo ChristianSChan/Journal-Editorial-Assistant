@@ -39,7 +39,7 @@ and reduce time spent sorting through weak recommendations.
 - Conditional local feedback learning lets users mark candidates useful/irrelevant for a specific manuscript context, with reasons such as wrong topic, wrong method, or wrong population/context.
 - Institution-exclusion suggestions use OpenAlex institution search plus affiliations already seen in the current session.
 - English-publication filtering is enabled by default and can be turned off by the user.
-- PDF field extraction to prefill manuscript fields before editing.
+- PDF field extraction to prefill manuscript fields before editing, plus local reference-section mining that can add recent, relevant cited works as reviewer-search queries.
 - Decision Assistant statistical audit with a lightweight statcheck-style p-value consistency scan for APA-style test reports.
 - Local decision-record storage for later review rounds, so prior concerns can be loaded and checked against authors' responses.
 - Generic journal-name entry. No journal-specific board lists or private defaults are bundled in this public template.
@@ -260,6 +260,22 @@ The **API and LLM settings** panel also supports:
 Keys entered in the app are used for the running session. Users may optionally
 save settings locally outside the project folder at their operating system's
 application-support path.
+
+## Privacy and Uploaded PDFs
+
+Uploaded manuscript PDFs are parsed locally by default for field extraction and
+reference-section mining. The app does not send the full PDF contents to OpenAI
+or another LLM provider unless the user enables LLM assistance and runs an
+LLM-assisted task.
+
+Scholarly metadata services such as OpenAlex, Semantic Scholar, Scopus,
+Clarivate, Crossref, ORCID, and PubMed receive search queries or metadata terms
+needed for reviewer discovery. They are not sent the full uploaded PDF by this
+app.
+
+Before using any LLM-assisted feature with confidential editorial material,
+users should check the relevant journal, publisher, society, funder,
+institutional, and platform policies.
 
 ### Scopus Author Diagnostics
 

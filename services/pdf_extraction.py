@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from html import unescape
 from io import BytesIO
 
@@ -16,6 +17,7 @@ from services.llm_assist import extract_manuscript_fields_with_llm
 MAX_PAGES = 8
 MAX_TEXT_CHARS = 80_000
 MAX_PREVIEW_CHARS_PER_PAGE = 2_500
+MAX_REFERENCE_QUERIES = 8
 
 
 class ExtractedManuscriptFields(BaseModel):
@@ -25,6 +27,18 @@ class ExtractedManuscriptFields(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     text_preview: str = ""
     page_previews: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class ExtractedReferenceQuery(BaseModel):
+    title: str
+    year: int
+    journal: str = ""
+    matched_terms: list[str] = Field(default_factory=list)
+
+
+class ExtractedReferenceQueries(BaseModel):
+    queries: list[ExtractedReferenceQuery] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -103,6 +117,82 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
     return extraction.text[:MAX_TEXT_CHARS]
 
 
+def extract_reference_queries_from_pdf(
+    pdf_bytes: bytes,
+    manuscript_title: str = "",
+    abstract: str = "",
+    keywords: list[str] | None = None,
+) -> ExtractedReferenceQueries:
+    """Extract recent, title-relevant cited works from the PDF reference section."""
+    full_text = _extract_full_pdf_text(pdf_bytes)
+    result = ExtractedReferenceQueries()
+    if not full_text.strip():
+        result.notes.append("Reference mining skipped: no selectable full-text PDF content found.")
+        return result
+
+    reference_text = _extract_reference_section(full_text)
+    if not reference_text:
+        result.notes.append("Reference section was not clearly identified.")
+        return result
+
+    manuscript_terms = _reference_relevance_terms(manuscript_title, abstract, keywords or [])
+    if not manuscript_terms:
+        result.notes.append("Reference mining skipped: not enough manuscript terms for relevance filtering.")
+        return result
+
+    current_year = date.today().year
+    min_year = current_year - 10
+    entries = _reference_entries(reference_text)
+    candidates: list[ExtractedReferenceQuery] = []
+    for entry in entries:
+        year = _reference_year(entry)
+        if year is None or year < min_year or year > current_year + 1:
+            continue
+        title, journal = _reference_title_and_journal(entry, year)
+        if not _is_reference_title_candidate(title):
+            continue
+        matched_terms = _matched_reference_terms(" ".join([title, journal]), manuscript_terms)
+        title_matched_terms = _matched_reference_terms(title, manuscript_terms)
+        if not title_matched_terms:
+            continue
+        candidates.append(
+            ExtractedReferenceQuery(
+                title=title,
+                year=year,
+                journal=journal,
+                matched_terms=matched_terms,
+            )
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            len(set(item.matched_terms)),
+            item.year,
+            1 if item.journal else 0,
+        ),
+        reverse=True,
+    )
+    deduped: list[ExtractedReferenceQuery] = []
+    seen_titles: set[str] = set()
+    for candidate in candidates:
+        key = re.sub(r"[^a-z0-9]+", " ", candidate.title.casefold()).strip()
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+        deduped.append(candidate)
+        if len(deduped) >= MAX_REFERENCE_QUERIES:
+            break
+
+    result.queries = deduped
+    if deduped:
+        result.notes.append(
+            f"Reference mining added {len(deduped)} recent cited work{'s' if len(deduped) != 1 else ''} as reviewer-search queries."
+        )
+    else:
+        result.notes.append("No past-decade references passed title-relevance filtering.")
+    return result
+
+
 def _extract_with_pymupdf(pdf_bytes: bytes) -> PdfTextExtraction:
     page_texts: list[str] = []
     title_candidates: list[str] = []
@@ -158,6 +248,20 @@ def _extract_with_pypdf(pdf_bytes: bytes) -> PdfTextExtraction:
         title_candidates=[],
         engine="pypdf fallback",
     )
+
+
+def _extract_full_pdf_text(pdf_bytes: bytes) -> str:
+    try:
+        document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        return _normalize_text("\n".join(page.get_text("text") or "" for page in document))[:250_000]
+    except Exception:
+        pass
+
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes))
+        return _normalize_text("\n".join(page.extract_text() or "" for page in reader.pages))[:250_000]
+    except Exception:
+        return ""
 
 
 def _pymupdf_title_candidates(page: fitz.Page) -> list[str]:
@@ -384,6 +488,173 @@ def _looks_like_author_or_affiliation(line: str) -> bool:
     if re.fullmatch(r"([A-Z][A-Za-z.-]+\s+){1,5}[A-Z][A-Za-z.-]+", line):
         return True
     return False
+
+
+def _extract_reference_section(text: str) -> str:
+    lines = text.splitlines()
+    start_index: int | None = None
+    for index, line in enumerate(lines):
+        if re.fullmatch(r"\s*(references|bibliography|literature cited)\s*", line, flags=re.IGNORECASE):
+            start_index = index + 1
+    if start_index is None:
+        match = re.search(
+            r"(?:^|\n)\s*(references|bibliography|literature cited)\s*(?:\n|$)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return ""
+        return text[match.end() :]
+
+    end_index = len(lines)
+    for index in range(start_index, len(lines)):
+        if re.fullmatch(
+            r"\s*(appendix|appendices|supplementary material|supplemental material|tables?|figures?)\s*",
+            lines[index],
+            flags=re.IGNORECASE,
+        ):
+            end_index = index
+            break
+    return "\n".join(lines[start_index:end_index])
+
+
+def _reference_entries(reference_text: str) -> list[str]:
+    lines = [_clean_field(line, max_length=1000) for line in reference_text.splitlines()]
+    lines = [line for line in lines if line]
+    entries: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        if _looks_like_new_reference(line) and current:
+            entries.append(_clean_field(" ".join(current), max_length=2000))
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        entries.append(_clean_field(" ".join(current), max_length=2000))
+    return [entry for entry in entries if len(entry) >= 40]
+
+
+def _looks_like_new_reference(line: str) -> bool:
+    if re.match(r"^(\[\d+\]|\d+[\).])\s+", line):
+        return True
+    if re.match(r"^[A-Z][A-Za-z'’.-]+,\s+[A-Z]", line):
+        return True
+    if re.search(r"\(\d{4}\)", line) and re.match(r"^[A-Z][A-Za-z'’.-]+", line):
+        return True
+    return False
+
+
+def _reference_year(entry: str) -> int | None:
+    years = [
+        int(match.group(1))
+        for match in re.finditer(r"(?:\(|\b)(20[0-9]{2}|19[0-9]{2})(?:\)|\b)", entry)
+    ]
+    return years[0] if years else None
+
+
+def _reference_title_and_journal(entry: str, year: int) -> tuple[str, str]:
+    entry = re.sub(r"https?://\S+|doi\s*:?\s*\S+", " ", entry, flags=re.IGNORECASE)
+    entry = re.sub(r"^(\[\d+\]|\d+[\).])\s+", "", entry).strip()
+    year_match = re.search(rf"(?:\(|\b){year}(?:\)|\b)", entry)
+    title = ""
+    journal = ""
+
+    if year_match:
+        after_year = entry[year_match.end() :].strip(" .")
+        parts = _reference_sentence_parts(after_year)
+        title = _first_reference_title_part(parts)
+        if title:
+            title_index = parts.index(title)
+            journal = _first_reference_journal_part(parts[title_index + 1 :])
+
+    if not title:
+        parts = _reference_sentence_parts(entry)
+        title = _first_reference_title_part(parts)
+        if title:
+            title_index = parts.index(title)
+            journal = _first_reference_journal_part(parts[title_index + 1 :])
+
+    return _clean_reference_title(title), _clean_field(journal, max_length=180)
+
+
+def _reference_sentence_parts(text: str) -> list[str]:
+    return [
+        _clean_field(part, max_length=300)
+        for part in re.split(r"\.\s+", text)
+        if _clean_field(part, max_length=300)
+    ]
+
+
+def _first_reference_title_part(parts: list[str]) -> str:
+    for part in parts[:5]:
+        if _is_reference_title_candidate(part):
+            return part
+    return ""
+
+
+def _first_reference_journal_part(parts: list[str]) -> str:
+    for part in parts[:4]:
+        if re.search(r"\b(journal|review|psychology|science|medicine|health|research|behavior|behaviour|social|clinical|development|aging|ageing)\b", part, flags=re.IGNORECASE):
+            return part
+    return parts[0] if parts else ""
+
+
+def _is_reference_title_candidate(title: str) -> bool:
+    if not 12 <= len(title) <= 260:
+        return False
+    if len(title.split()) < 4:
+        return False
+    if re.search(r"\b(journal|volume|issue|doi|retrieved|http|university press|publisher)\b", title, flags=re.IGNORECASE):
+        return False
+    if title.count(",") >= 5:
+        return False
+    return bool(re.search(r"[A-Za-z]{4,}", title))
+
+
+def _clean_reference_title(title: str) -> str:
+    title = _clean_field(title, max_length=260)
+    title = re.sub(r"^\W+", "", title)
+    title = re.sub(r"\s+", " ", title).strip(" .")
+    return title
+
+
+def _reference_relevance_terms(title: str, abstract: str, keywords: list[str]) -> list[str]:
+    stopwords = {
+        "about", "after", "among", "analysis", "article", "based", "between",
+        "during", "effect", "effects", "evidence", "journal", "method",
+        "paper", "results", "study", "their", "these", "this", "using",
+        "with", "within",
+    }
+    terms: list[str] = []
+    terms.extend(keyword.strip() for keyword in keywords if keyword.strip())
+    text = " ".join([title, abstract])
+    for match in re.finditer(r"\b[A-Za-z][A-Za-z-]{4,}\b", text):
+        term = match.group(0).casefold()
+        if term not in stopwords:
+            terms.append(term)
+    return _dedupe_reference_terms(terms)[:40]
+
+
+def _matched_reference_terms(text: str, terms: list[str]) -> list[str]:
+    text = text.casefold()
+    matches: list[str] = []
+    for term in terms:
+        pattern = r"(?<![A-Za-z0-9])" + re.escape(term.casefold()) + r"(?![A-Za-z0-9])"
+        if re.search(pattern, text):
+            matches.append(term)
+    return _dedupe_reference_terms(matches)
+
+
+def _dedupe_reference_terms(terms: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        cleaned = _clean_field(term, max_length=80).casefold()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduped.append(cleaned)
+    return deduped
 
 
 def _normalize_text(text: str) -> str:
